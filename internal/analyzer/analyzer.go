@@ -151,10 +151,7 @@ func buildLifecycle(rep Report, seq []storage.Observation) Lifecycle {
 			runIP = seq[i].IP
 		}
 	}
-	d := seq[len(seq)-1].ObservedAt.Sub(runStart)
-	if d >= 0 {
-		durations = append(durations, d)
-	}
+	// Do not treat the still-open last IP run as a completed lifetime.
 
 	if len(durations) == 0 {
 		return lc

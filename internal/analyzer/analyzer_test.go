@@ -115,7 +115,7 @@ func TestAnalyzeEmpty(t *testing.T) {
 
 func TestAnalyzeLifecycle(t *testing.T) {
 	// 4 observations, 1h apart, IPs: A A B C
-	// run A: 0h→2h = 2h; run B: 2h→3h = 1h; run C: open 0h
+	// completed runs only: A 0h→2h = 2h; B 2h→3h = 1h; open C excluded
 	s := seedStore(t, []string{"10.0.0.1", "10.0.0.1", "10.0.0.2", "10.0.0.3"}, time.Hour)
 	rep, err := Analyze(context.Background(), s)
 	if err != nil {
@@ -127,14 +127,14 @@ func TestAnalyzeLifecycle(t *testing.T) {
 	if rep.Lifecycle.ChangeCount != 2 {
 		t.Fatalf("changes = %d", rep.Lifecycle.ChangeCount)
 	}
-	if rep.Lifecycle.AvgLifetime != time.Hour {
-		t.Fatalf("avg lifetime = %v, want 1h", rep.Lifecycle.AvgLifetime)
+	if rep.Lifecycle.AvgLifetime != time.Hour+30*time.Minute {
+		t.Fatalf("avg lifetime = %v, want 1.5h", rep.Lifecycle.AvgLifetime)
 	}
 	if rep.Lifecycle.MaxLifetime != 2*time.Hour {
 		t.Fatalf("max = %v, want 2h", rep.Lifecycle.MaxLifetime)
 	}
-	if rep.Lifecycle.MinLifetime != 0 {
-		t.Fatalf("min = %v, want 0", rep.Lifecycle.MinLifetime)
+	if rep.Lifecycle.MinLifetime != time.Hour {
+		t.Fatalf("min = %v, want 1h", rep.Lifecycle.MinLifetime)
 	}
 }
 

@@ -66,11 +66,11 @@ func Load(path string) (Config, error) {
 				return cfg, fmt.Errorf("failed to read config file %s: %w", path, err)
 			}
 		} else {
-			fileCfg := cfg
-			if err := yaml.Unmarshal(raw, &fileCfg); err != nil {
+			fileCfg, err := parseFile(raw)
+			if err != nil {
 				return cfg, fmt.Errorf("failed to parse config file %s: %w", path, err)
 			}
-			cfg = merge(cfg, fileCfg)
+			cfg = mergeFile(cfg, fileCfg)
 		}
 	}
 
@@ -82,30 +82,56 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// merge fills zero-valued fields in fileCfg from base defaults.
-func merge(base, fileCfg Config) Config {
-	out := fileCfg
+// fileConfig uses pointers so an explicit zero (e.g. retries: 0) is preserved.
+type fileConfig struct {
+	Collector *struct {
+		Interval   *time.Duration `yaml:"interval"`
+		Timeout    *time.Duration `yaml:"timeout"`
+		Retries    *int           `yaml:"retries"`
+		RetryDelay *time.Duration `yaml:"retry_delay"`
+	} `yaml:"collector"`
+	Database *struct {
+		Path *string `yaml:"path"`
+	} `yaml:"database"`
+	Logging *struct {
+		Level *string `yaml:"level"`
+	} `yaml:"logging"`
+	Providers *[]string `yaml:"providers"`
+}
 
-	if fileCfg.Collector.Interval <= 0 {
-		out.Collector.Interval = base.Collector.Interval
+func parseFile(raw []byte) (fileConfig, error) {
+	var fc fileConfig
+	if err := yaml.Unmarshal(raw, &fc); err != nil {
+		return fc, err
 	}
-	if fileCfg.Collector.Timeout <= 0 {
-		out.Collector.Timeout = base.Collector.Timeout
+	return fc, nil
+}
+
+// mergeFile overlays present (non-nil) file fields onto base defaults.
+func mergeFile(base Config, fc fileConfig) Config {
+	out := base
+	if fc.Collector != nil {
+		if fc.Collector.Interval != nil && *fc.Collector.Interval > 0 {
+			out.Collector.Interval = *fc.Collector.Interval
+		}
+		if fc.Collector.Timeout != nil && *fc.Collector.Timeout > 0 {
+			out.Collector.Timeout = *fc.Collector.Timeout
+		}
+		if fc.Collector.Retries != nil && *fc.Collector.Retries >= 0 {
+			out.Collector.Retries = *fc.Collector.Retries
+		}
+		if fc.Collector.RetryDelay != nil && *fc.Collector.RetryDelay >= 0 {
+			out.Collector.RetryDelay = *fc.Collector.RetryDelay
+		}
 	}
-	if fileCfg.Collector.Retries <= 0 {
-		out.Collector.Retries = base.Collector.Retries
+	if fc.Database != nil && fc.Database.Path != nil && *fc.Database.Path != "" {
+		out.Database.Path = *fc.Database.Path
 	}
-	if fileCfg.Collector.RetryDelay <= 0 {
-		out.Collector.RetryDelay = base.Collector.RetryDelay
+	if fc.Logging != nil && fc.Logging.Level != nil && *fc.Logging.Level != "" {
+		out.Logging.Level = *fc.Logging.Level
 	}
-	if fileCfg.Database.Path == "" {
-		out.Database.Path = base.Database.Path
-	}
-	if fileCfg.Logging.Level == "" {
-		out.Logging.Level = base.Logging.Level
-	}
-	if len(fileCfg.Providers) == 0 {
-		out.Providers = base.Providers
+	if fc.Providers != nil && len(*fc.Providers) > 0 {
+		out.Providers = append([]string(nil), *fc.Providers...)
 	}
 	return out
 }

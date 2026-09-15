@@ -146,7 +146,11 @@ func cmdStatus(args []string) int {
 		fmt.Fprintf(os.Stderr, "failed to initialize database: %v\n", err)
 		return 1
 	}
-	defer store.Close()
+	defer func() {
+		if cerr := store.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "failed to close database: %v\n", cerr)
+		}
+	}()
 
 	st, err := store.Status(ctx)
 	if err != nil {
@@ -199,7 +203,11 @@ func cmdHistory(args []string) int {
 		fmt.Fprintf(os.Stderr, "failed to initialize database: %v\n", err)
 		return 1
 	}
-	defer store.Close()
+	defer func() {
+		if cerr := store.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "failed to close database: %v\n", cerr)
+		}
+	}()
 
 	changes, err := store.Changes(ctx, limit)
 	if err != nil {
@@ -238,7 +246,11 @@ func cmdAnalyze(args []string) int {
 		fmt.Fprintf(os.Stderr, "failed to initialize database: %v\n", err)
 		return 1
 	}
-	defer store.Close()
+	defer func() {
+		if cerr := store.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "failed to close database: %v\n", cerr)
+		}
+	}()
 
 	rep, err := analyzer.Analyze(ctx, store)
 	if err != nil {

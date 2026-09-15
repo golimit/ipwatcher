@@ -68,9 +68,7 @@ func (c *Collector) tickOnce(ctx context.Context) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	start := time.Now()
-	addr, prov, err := c.lookupWithRetry(ctx)
-	latency := time.Since(start).Milliseconds()
+	addr, prov, latency, err := c.lookupWithRetry(ctx)
 
 	obs := storage.Observation{
 		ObservedAt: time.Now().UTC(),
@@ -78,10 +76,13 @@ func (c *Collector) tickOnce(ctx context.Context) {
 		LatencyMS:  latency,
 	}
 
+	// Writes must finish even if the process is stopping (SIGINT/SIGTERM).
+	writeCtx := context.WithoutCancel(ctx)
+
 	if err != nil {
 		obs.Success = false
 		obs.Error = err.Error()
-		if werr := c.store.InsertObservation(ctx, obs); werr != nil {
+		if werr := c.store.InsertObservation(writeCtx, obs); werr != nil {
 			c.log.Error("database write failed", "error", werr.Error())
 		}
 		c.log.Warn("public ip query failed", "error", err.Error())
@@ -92,7 +93,7 @@ func (c *Collector) tickOnce(ctx context.Context) {
 	obs.IP = addr
 	obs.Provider = prov.Name()
 
-	if werr := c.store.InsertObservation(ctx, obs); werr != nil {
+	if werr := c.store.InsertObservation(writeCtx, obs); werr != nil {
 		c.log.Error("database write failed", "error", werr.Error())
 		return
 	}
@@ -103,33 +104,36 @@ func (c *Collector) tickOnce(ctx context.Context) {
 		"latency", fmt.Sprintf("%dms", latency),
 	)
 
-	if err := c.detectChange(ctx, addr, obs.ObservedAt); err != nil {
+	if err := c.detectChange(writeCtx, addr, obs.ObservedAt); err != nil {
 		c.log.Error("failed to record IP change", "error", err.Error())
 	}
 }
 
-func (c *Collector) lookupWithRetry(ctx context.Context) (netip.Addr, provider.Provider, error) {
+func (c *Collector) lookupWithRetry(ctx context.Context) (netip.Addr, provider.Provider, int64, error) {
 	attempts := c.opts.Retries + 1
 	var lastErr error
+	var latencyMS int64
 	for i := 0; i < attempts; i++ {
 		if i > 0 && c.opts.RetryDelay > 0 {
 			select {
 			case <-ctx.Done():
-				return netip.Addr{}, nil, ctx.Err()
+				return netip.Addr{}, nil, 0, ctx.Err()
 			case <-time.After(c.opts.RetryDelay):
 			}
 		}
 
 		reqCtx, cancel := context.WithTimeout(ctx, c.opts.Timeout)
+		start := time.Now()
 		addr, prov, err := c.failover.Lookup(reqCtx)
+		latencyMS = time.Since(start).Milliseconds()
 		cancel()
 		if err == nil {
-			return addr, prov, nil
+			return addr, prov, latencyMS, nil
 		}
 		lastErr = err
 		c.log.Warn("public ip query failed", "attempt", i+1, "error", err.Error())
 	}
-	return netip.Addr{}, nil, lastErr
+	return netip.Addr{}, nil, latencyMS, lastErr
 }
 
 func (c *Collector) detectChange(ctx context.Context, newIP netip.Addr, at time.Time) error {
