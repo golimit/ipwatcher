@@ -1,6 +1,7 @@
 # Binaries (root-level only; do not ignore cmd/ipwatcher/)
 /ipwatcher
 /ipwatcher.exe
+/ipwatcher-*
 
 # Data
 data/
@@ -16,8 +17,19 @@ config.yaml
 .idea/
 .vscode/
 *.swp
+*.swo
 .DS_Store
 Thumbs.db
 
 # Build artifacts
 dist/
+*.exe
+*.test
+*.out
+
+# Coverage / tmp
+coverage.out
+coverage.html
+*.log
+tmp_*.py
+
