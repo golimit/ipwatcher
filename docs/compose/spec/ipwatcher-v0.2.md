@@ -3,7 +3,7 @@ feature: ipwatcher-v0.2
 status: delivered
 updated: 2026-09-16
 branch: feat/ipwatcher-v0.2
-commits: e5eb00a..HEAD
+commits: e5eb00a..7cd617b
 ---
 
 # ipwatcher v0.2 — ignore/purge + IPv6 + operator tooling
