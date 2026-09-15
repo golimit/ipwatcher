@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -11,10 +13,15 @@ import (
 
 // Config holds all runtime settings for ipwatcher.
 type Config struct {
-	Collector CollectorConfig `yaml:"collector"`
-	Database  DatabaseConfig  `yaml:"database"`
-	Logging   LoggingConfig   `yaml:"logging"`
-	Providers []string        `yaml:"providers"`
+	Collector  CollectorConfig `yaml:"collector"`
+	Database   DatabaseConfig  `yaml:"database"`
+	Logging    LoggingConfig   `yaml:"logging"`
+	Providers  []string        `yaml:"providers"`
+	Providers6 []string        `yaml:"providers_v6"`
+	// IgnoreIPs lists IPv4/IPv6 addresses or CIDR prefixes that must never
+	// be recorded (captive portal, misbehaving provider, known-bad ranges).
+	IgnoreIPs []string     `yaml:"ignore_ips"`
+	Notify    NotifyConfig `yaml:"notify"`
 }
 
 type CollectorConfig struct {
@@ -30,6 +37,11 @@ type DatabaseConfig struct {
 
 type LoggingConfig struct {
 	Level string `yaml:"level"`
+}
+
+type NotifyConfig struct {
+	WebhookURL string        `yaml:"webhook_url"`
+	Timeout    time.Duration `yaml:"timeout"`
 }
 
 // Default returns the recommended production defaults from the plan.
@@ -52,6 +64,11 @@ func Default() Config {
 			"https://ipv4.icanhazip.com",
 			"https://api.ipify.org",
 			"https://4.ident.me",
+		},
+		// Empty by default: IPv6 collection is opt-in.
+		Providers6: nil,
+		Notify: NotifyConfig{
+			Timeout: 5 * time.Second,
 		},
 	}
 }
@@ -97,7 +114,13 @@ type fileConfig struct {
 	Logging *struct {
 		Level *string `yaml:"level"`
 	} `yaml:"logging"`
-	Providers *[]string `yaml:"providers"`
+	Providers  *[]string `yaml:"providers"`
+	Providers6 *[]string `yaml:"providers_v6"`
+	IgnoreIPs  *[]string `yaml:"ignore_ips"`
+	Notify     *struct {
+		WebhookURL *string        `yaml:"webhook_url"`
+		Timeout    *time.Duration `yaml:"timeout"`
+	} `yaml:"notify"`
 }
 
 func parseFile(raw []byte) (fileConfig, error) {
@@ -134,6 +157,20 @@ func mergeFile(base Config, fc fileConfig) Config {
 	if fc.Providers != nil && len(*fc.Providers) > 0 {
 		out.Providers = append([]string(nil), *fc.Providers...)
 	}
+	if fc.Providers6 != nil {
+		out.Providers6 = append([]string(nil), *fc.Providers6...)
+	}
+	if fc.IgnoreIPs != nil {
+		out.IgnoreIPs = append([]string(nil), *fc.IgnoreIPs...)
+	}
+	if fc.Notify != nil {
+		if fc.Notify.WebhookURL != nil {
+			out.Notify.WebhookURL = *fc.Notify.WebhookURL
+		}
+		if fc.Notify.Timeout != nil && *fc.Notify.Timeout > 0 {
+			out.Notify.Timeout = *fc.Notify.Timeout
+		}
+	}
 	return out
 }
 
@@ -167,32 +204,31 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("IPWATCHER_PROVIDERS"); v != "" {
 		cfg.Providers = splitCSV(v)
 	}
+	if v := os.Getenv("IPWATCHER_PROVIDERS_V6"); v != "" {
+		cfg.Providers6 = splitCSV(v)
+	}
+	if v := os.Getenv("IPWATCHER_IGNORE_IPS"); v != "" {
+		cfg.IgnoreIPs = splitCSV(v)
+	}
+	if v := os.Getenv("IPWATCHER_WEBHOOK_URL"); v != "" {
+		cfg.Notify.WebhookURL = v
+	}
+	if v := os.Getenv("IPWATCHER_WEBHOOK_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.Notify.Timeout = d
+		}
+	}
 }
 
 func splitCSV(s string) []string {
 	var out []string
-	start := 0
-	for i := 0; i <= len(s); i++ {
-		if i == len(s) || s[i] == ',' {
-			part := trimSpace(s[start:i])
-			if part != "" {
-				out = append(out, part)
-			}
-			start = i + 1
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
 		}
 	}
 	return out
-}
-
-func trimSpace(s string) string {
-	start, end := 0, len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\t') {
-		start++
-	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
-		end--
-	}
-	return s[start:end]
 }
 
 // Validate checks invariants required at runtime.
@@ -217,5 +253,90 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("logging.level must be one of debug|info|warn|error")
 	}
+	if _, err := ParseIgnoreFilter(c.IgnoreIPs); err != nil {
+		return err
+	}
+	if c.Notify.WebhookURL != "" {
+		if !strings.HasPrefix(c.Notify.WebhookURL, "http://") && !strings.HasPrefix(c.Notify.WebhookURL, "https://") {
+			return fmt.Errorf("notify.webhook_url must be http(s)")
+		}
+		if c.Notify.Timeout <= 0 {
+			return fmt.Errorf("notify.timeout must be positive")
+		}
+	}
 	return nil
+}
+
+// IgnoreFilter matches addresses against exact IPs and CIDR prefixes.
+type IgnoreFilter struct {
+	prefixes []netip.Prefix
+}
+
+// ParseIgnoreFilter validates entries as IP or CIDR (v4/v6) and builds a filter.
+func ParseIgnoreFilter(entries []string) (*IgnoreFilter, error) {
+	f := &IgnoreFilter{prefixes: make([]netip.Prefix, 0, len(entries))}
+	for _, s := range entries {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		p, err := ParseIPOrPrefix(s)
+		if err != nil {
+			return nil, fmt.Errorf("ignore_ips: %w", err)
+		}
+		f.prefixes = append(f.prefixes, p)
+	}
+	return f, nil
+}
+
+// ParseIPOrPrefix accepts "1.2.3.4", "1.2.3.0/24", "2001:db8::1", "2001:db8::/32".
+func ParseIPOrPrefix(s string) (netip.Prefix, error) {
+	if strings.Contains(s, "/") {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return netip.Prefix{}, fmt.Errorf("%q is not a valid IP or CIDR", s)
+		}
+		return p.Masked(), nil
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("%q is not a valid IP or CIDR", s)
+	}
+	bits := 32
+	if addr.Is6() {
+		bits = 128
+	}
+	return netip.PrefixFrom(addr.Unmap(), bits), nil
+}
+
+// Contains reports whether addr falls inside any ignored prefix.
+func (f *IgnoreFilter) Contains(addr netip.Addr) bool {
+	if f == nil || !addr.IsValid() {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, p := range f.prefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// Len returns how many prefixes are configured.
+func (f *IgnoreFilter) Len() int {
+	if f == nil {
+		return 0
+	}
+	return len(f.prefixes)
+}
+
+// Prefixes returns a copy of the configured prefixes.
+func (f *IgnoreFilter) Prefixes() []netip.Prefix {
+	if f == nil {
+		return nil
+	}
+	out := make([]netip.Prefix, len(f.prefixes))
+	copy(out, f.prefixes)
+	return out
 }

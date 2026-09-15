@@ -10,7 +10,27 @@ database:
 logging:
   level: info
 
+# IPv4 providers (required). Failover in order.
 providers:
   - https://ipv4.icanhazip.com
   - https://api.ipify.org
   - https://4.ident.me
+
+# IPv6 providers (optional). Empty = do not collect IPv6.
+# Failures are ignored; only successful lookups are recorded.
+providers_v6:
+  - https://ipv6.icanhazip.com
+  - https://api6.ipify.org
+  - https://6.ident.me
+
+# Never record these addresses/ranges (captive portal, known-bad providers).
+# Accepts single IP or CIDR, IPv4 and IPv6.
+ignore_ips:
+  - 154.3.34.66
+  # - 154.3.0.0/16
+  # - 2001:db8::/32
+
+# Optional: POST JSON on IP change. Failures only log a warning.
+# notify:
+#   webhook_url: https://example.com/hooks/ipwatcher
+#   timeout: 5s

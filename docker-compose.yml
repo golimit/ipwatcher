@@ -12,3 +12,6 @@ services:
       IPWATCHER_RETRY_DELAY: 2s
       IPWATCHER_DB_PATH: /app/data/ipwatcher.db
       IPWATCHER_LOG_LEVEL: info
+      # IPWATCHER_PROVIDERS_V6: "https://ipv6.icanhazip.com,https://api6.ipify.org,https://6.ident.me"
+      # IPWATCHER_IGNORE_IPS: "154.3.34.66,154.3.0.0/16"
+      # IPWATCHER_WEBHOOK_URL: "https://example.com/hooks/ipwatcher"

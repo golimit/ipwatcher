@@ -17,7 +17,7 @@ type PrefixStat struct {
 	Pct    float64
 }
 
-// Lifecycle holds IP dwell-time statistics.
+// Lifecycle holds IP dwell-time statistics for one family.
 type Lifecycle struct {
 	ObservationDays float64
 	ChangeCount     int
@@ -29,45 +29,64 @@ type Lifecycle struct {
 	DailyChangeRate float64
 }
 
+// FamilyReport is distribution + lifecycle for one address family.
+type FamilyReport struct {
+	HasData     bool
+	UniqueIPs   int
+	ChangeCount int
+	Prefixes    map[int][]PrefixStat
+	Lifecycle   Lifecycle
+}
+
 // Report is the full analyze output.
 type Report struct {
 	ObservationDays float64
 	ChangeCount     int
 	UniqueIPs       int
-	Prefixes        map[int][]PrefixStat // keyed by bits: 24,23,22,21,20
-	Lifecycle       Lifecycle
+	Prefixes        map[int][]PrefixStat // keyed by bits, IPv4 view (legacy)
+	Lifecycle       Lifecycle            // IPv4-primary view (legacy)
+	IPv4            FamilyReport
+	IPv6            FamilyReport
 	HasData         bool
+	HasIPv6         bool
 	Insufficient    bool // true when observation window < 30 days
 }
 
-var defaultPrefixBits = []int{24, 23, 22, 21, 20}
+var (
+	v4PrefixBits = []int{24, 23, 22, 21, 20}
+	v6PrefixBits = []int{64, 56, 48, 32}
+)
 
 // Analyze computes distribution and lifecycle stats from storage.
 func Analyze(ctx context.Context, store *storage.Store) (Report, error) {
 	var rep Report
 
-	uniq, err := store.UniqueSuccessIPs(ctx)
+	fr4, err := analyzeFamily(ctx, store, storage.Family4, v4PrefixBits)
 	if err != nil {
 		return rep, err
 	}
-	changes, err := store.Changes(ctx, 0)
+	fr6, err := analyzeFamily(ctx, store, storage.Family6, v6PrefixBits)
 	if err != nil {
 		return rep, err
 	}
-	seq, err := store.SuccessIPSequence(ctx)
-	if err != nil {
-		return rep, err
-	}
+	rep.IPv4 = fr4
+	rep.IPv6 = fr6
 
-	if len(uniq) == 0 && len(changes) == 0 && len(seq) == 0 {
-		return rep, nil
-	}
-	rep.HasData = true
-	rep.UniqueIPs = len(uniq)
-	rep.ChangeCount = len(changes)
+	// Legacy top-level fields stay IPv4-primary so existing consumers keep working.
+	rep.Prefixes = rep.IPv4.Prefixes
+	rep.Lifecycle = rep.IPv4.Lifecycle
+	rep.UniqueIPs = rep.IPv4.UniqueIPs
+	rep.ChangeCount = rep.IPv4.ChangeCount
+	rep.HasData = rep.IPv4.HasData || rep.IPv6.HasData
+	rep.HasIPv6 = rep.IPv6.HasData
 
+	// Observation window spans both families when present.
+	uniqAll, err := store.UniqueSuccessIPs(ctx, 0)
+	if err != nil {
+		return rep, err
+	}
 	var first, last time.Time
-	for _, pair := range uniq {
+	for _, pair := range uniqAll {
 		if first.IsZero() || pair[0].Before(first) {
 			first = pair[0]
 		}
@@ -82,10 +101,48 @@ func Analyze(ctx context.Context, store *storage.Store) (Report, error) {
 		}
 		rep.Insufficient = rep.ObservationDays < 30
 	}
-
-	rep.Prefixes = buildPrefixStats(uniq, defaultPrefixBits)
-	rep.Lifecycle = buildLifecycle(rep, seq)
+	rep.IPv4.Lifecycle.ObservationDays = rep.ObservationDays
+	rep.IPv6.Lifecycle.ObservationDays = rep.ObservationDays
+	rep.Lifecycle.ObservationDays = rep.ObservationDays
+	if rep.ObservationDays >= 1 {
+		rep.IPv4.Lifecycle.DailyChangeRate = float64(rep.IPv4.ChangeCount) / rep.ObservationDays
+		rep.IPv6.Lifecycle.DailyChangeRate = float64(rep.IPv6.ChangeCount) / rep.ObservationDays
+		rep.Lifecycle.DailyChangeRate = rep.IPv4.Lifecycle.DailyChangeRate
+	}
 	return rep, nil
+}
+
+func analyzeFamily(ctx context.Context, store *storage.Store, family byte, bits []int) (FamilyReport, error) {
+	var fr FamilyReport
+
+	uniq, err := store.UniqueSuccessIPs(ctx, family)
+	if err != nil {
+		return fr, err
+	}
+	if len(uniq) == 0 {
+		return fr, nil
+	}
+	changes, err := store.Changes(ctx, 0)
+	if err != nil {
+		return fr, err
+	}
+	famChanges := 0
+	for _, c := range changes {
+		if c.Family == family {
+			famChanges++
+		}
+	}
+	seq, err := store.SuccessIPSequence(ctx, family)
+	if err != nil {
+		return fr, err
+	}
+
+	fr.HasData = true
+	fr.UniqueIPs = len(uniq)
+	fr.ChangeCount = famChanges
+	fr.Prefixes = buildPrefixStats(uniq, bits)
+	fr.Lifecycle = buildLifecycle(famChanges, len(uniq), seq)
+	return fr, nil
 }
 
 func buildPrefixStats(uniq map[netip.Addr][2]time.Time, bits []int) map[int][]PrefixStat {
@@ -125,14 +182,10 @@ func buildPrefixStats(uniq map[netip.Addr][2]time.Time, bits []int) map[int][]Pr
 	return out
 }
 
-func buildLifecycle(rep Report, seq []storage.Observation) Lifecycle {
+func buildLifecycle(changeCount, uniqueIPs int, seq []storage.Observation) Lifecycle {
 	lc := Lifecycle{
-		ObservationDays: rep.ObservationDays,
-		ChangeCount:     rep.ChangeCount,
-		UniqueIPs:       rep.UniqueIPs,
-	}
-	if rep.ObservationDays >= 1 {
-		lc.DailyChangeRate = float64(rep.ChangeCount) / rep.ObservationDays
+		ChangeCount: changeCount,
+		UniqueIPs:   uniqueIPs,
 	}
 	if len(seq) == 0 {
 		return lc

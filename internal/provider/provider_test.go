@@ -149,3 +149,72 @@ func TestFailoverAllFail(t *testing.T) {
 		t.Fatal("expected all-fail error")
 	}
 }
+
+type staticFilter map[netip.Addr]struct{}
+
+func (f staticFilter) Contains(a netip.Addr) bool {
+	_, ok := f[a]
+	return ok
+}
+
+func TestFailoverSkipsFilteredIP(t *testing.T) {
+	bogus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("154.3.34.66"))
+	}))
+	defer bogus.Close()
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("120.229.60.138"))
+	}))
+	defer good.Close()
+
+	filter := staticFilter{netip.MustParseAddr("154.3.34.66"): {}}
+	fo := NewFailover(
+		NewHTTPProvider(bogus.URL, bogus.Client()),
+		NewHTTPProvider(good.URL, good.Client()),
+	).WithFilter(filter)
+
+	addr, _, err := fo.Lookup(context.Background())
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if addr.String() != "120.229.60.138" {
+		t.Fatalf("addr = %v", addr)
+	}
+}
+
+func TestFailoverAllIgnored(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("154.3.34.66"))
+	}))
+	defer srv.Close()
+
+	filter := staticFilter{netip.MustParseAddr("154.3.34.66"): {}}
+	fo := NewFailover(NewHTTPProvider(srv.URL, srv.Client())).WithFilter(filter)
+
+	_, _, err := fo.Lookup(context.Background())
+	if err == nil {
+		t.Fatal("expected error when all providers ignored")
+	}
+	if !strings.Contains(err.Error(), "ignore list") {
+		t.Fatalf("error = %v, want contain 'ignore list'", err)
+	}
+}
+
+func TestParseIPv6(t *testing.T) {
+	ok, err := ParseIPv6("2001:db8::1\n")
+	if err != nil {
+		t.Fatalf("ParseIPv6: %v", err)
+	}
+	if ok.String() != "2001:db8::1" {
+		t.Fatalf("addr = %v", ok)
+	}
+	if _, err := ParseIPv6("1.2.3.4"); err == nil {
+		t.Fatal("expected reject IPv4")
+	}
+	if _, err := ParseIPv6("::1"); err == nil {
+		t.Fatal("expected reject loopback")
+	}
+	if _, err := ParseIPv4("2001:db8::1"); err == nil {
+		t.Fatal("expected reject IPv6 in ParseIPv4")
+	}
+}

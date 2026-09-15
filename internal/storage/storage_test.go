@@ -2,10 +2,13 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"net/netip"
 	"path/filepath"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 func openTestStore(t *testing.T) *Store {
@@ -35,7 +38,7 @@ func TestInsertAndReadObservation(t *testing.T) {
 		t.Fatalf("InsertObservation: %v", err)
 	}
 
-	obs, err := s.LatestSuccess(ctx)
+	obs, err := s.LatestSuccess(ctx, Family4)
 	if err != nil {
 		t.Fatalf("LatestSuccess: %v", err)
 	}
@@ -44,6 +47,9 @@ func TestInsertAndReadObservation(t *testing.T) {
 	}
 	if obs.IP.String() != "1.2.3.4" {
 		t.Fatalf("ip = %v", obs.IP)
+	}
+	if obs.Family != Family4 {
+		t.Fatalf("family = %q", obs.Family)
 	}
 	if !obs.ObservedAt.Equal(now) {
 		t.Fatalf("observed_at = %v, want %v", obs.ObservedAt, now)
@@ -74,8 +80,7 @@ func TestInsertFailureObservation(t *testing.T) {
 		t.Fatalf("error = %q", latest.Error)
 	}
 
-	// LatestSuccess should still be empty.
-	cur, err := s.LatestSuccess(ctx)
+	cur, err := s.LatestSuccess(ctx, Family4)
 	if err != nil {
 		t.Fatalf("LatestSuccess: %v", err)
 	}
@@ -108,6 +113,9 @@ func TestInsertChange(t *testing.T) {
 	if changes[0].OldIP.String() != "1.2.3.4" || changes[0].NewIP.String() != "1.2.4.25" {
 		t.Fatalf("change = %+v", changes[0])
 	}
+	if changes[0].Family != Family4 {
+		t.Fatalf("family = %q", changes[0].Family)
+	}
 }
 
 func TestUniqueSuccessIPs(t *testing.T) {
@@ -128,7 +136,7 @@ func TestUniqueSuccessIPs(t *testing.T) {
 		}
 	}
 
-	uniq, err := s.UniqueSuccessIPs(ctx)
+	uniq, err := s.UniqueSuccessIPs(ctx, Family4)
 	if err != nil {
 		t.Fatalf("UniqueSuccessIPs: %v", err)
 	}
@@ -163,11 +171,250 @@ func TestLatestSuccessExcluding(t *testing.T) {
 		}
 	}
 
-	prev, err := s.LatestSuccessExcluding(ctx, t3, netip.MustParseAddr("1.2.3.18"))
+	prev, err := s.LatestSuccessExcluding(ctx, t3, Family4)
 	if err != nil {
 		t.Fatalf("LatestSuccessExcluding: %v", err)
 	}
 	if prev == nil || prev.IP.String() != "1.2.3.4" {
 		t.Fatalf("prev = %+v", prev)
+	}
+}
+
+func TestDeleteIP(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	bad := netip.MustParseAddr("154.3.34.66")
+	good := netip.MustParseAddr("120.229.60.138")
+	base := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
+
+	for i, ip := range []netip.Addr{bad, good, good} {
+		if err := s.InsertObservation(ctx, Observation{
+			ObservedAt: base.Add(time.Duration(i) * time.Minute),
+			IP:         ip,
+			Success:    true,
+			Provider:   "t",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.InsertChange(ctx, Change{
+		ChangedAt: base.Add(2 * time.Minute),
+		OldIP:     bad,
+		NewIP:     good,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertChange(ctx, Change{
+		ChangedAt: base.Add(5 * time.Minute),
+		OldIP:     good,
+		NewIP:     netip.MustParseAddr("120.229.60.200"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	obs, chg, err := s.DeleteIP(ctx, bad)
+	if err != nil {
+		t.Fatalf("DeleteIP: %v", err)
+	}
+	if obs != 1 {
+		t.Fatalf("obsRemoved = %d, want 1", obs)
+	}
+	if chg != 1 {
+		t.Fatalf("changesRemoved = %d, want 1", chg)
+	}
+
+	changes, err := s.Changes(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("remaining changes = %d, want 1", len(changes))
+	}
+	if changes[0].OldIP != good {
+		t.Fatalf("remaining change = %+v", changes[0])
+	}
+
+	uniq, err := s.UniqueSuccessIPs(ctx, Family4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := uniq[bad]; ok {
+		t.Fatal("bad IP still present in unique set")
+	}
+	if len(uniq) != 1 {
+		t.Fatalf("unique = %d, want 1", len(uniq))
+	}
+}
+
+func TestDeletePrefix(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
+
+	for i, ip := range []string{"154.3.34.66", "154.3.34.80", "120.229.60.138"} {
+		if err := s.InsertObservation(ctx, Observation{
+			ObservedAt: base.Add(time.Duration(i) * time.Minute),
+			IP:         netip.MustParseAddr(ip),
+			Success:    true,
+			Provider:   "t",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.InsertChange(ctx, Change{
+		ChangedAt: base.Add(3 * time.Minute),
+		OldIP:     netip.MustParseAddr("154.3.34.66"),
+		NewIP:     netip.MustParseAddr("120.229.60.138"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	obs, chg, err := s.DeletePrefix(ctx, netip.MustParsePrefix("154.3.34.0/24"))
+	if err != nil {
+		t.Fatalf("DeletePrefix: %v", err)
+	}
+	if obs != 2 {
+		t.Fatalf("obsRemoved = %d, want 2", obs)
+	}
+	if chg < 1 {
+		t.Fatalf("changesRemoved = %d, want >= 1", chg)
+	}
+
+	uniq, err := s.UniqueSuccessIPs(ctx, Family4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uniq) != 1 {
+		t.Fatalf("unique = %d, want 1", len(uniq))
+	}
+	if _, ok := uniq[netip.MustParseAddr("120.229.60.138")]; !ok {
+		t.Fatal("good IP missing")
+	}
+}
+
+func TestIPv6ObservationFamily(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.InsertObservation(ctx, Observation{
+		ObservedAt: time.Now().UTC(),
+		IP:         netip.MustParseAddr("2001:db8::1"),
+		Success:    true,
+		Provider:   "t",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	v6, err := s.LatestSuccess(ctx, Family6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v6 == nil || v6.Family != Family6 {
+		t.Fatalf("v6 = %+v", v6)
+	}
+	v4, err := s.LatestSuccess(ctx, Family4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v4 != nil {
+		t.Fatalf("unexpected v4: %+v", v4)
+	}
+}
+
+func TestStatusDualFamily(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
+	_ = s.InsertObservation(ctx, Observation{
+		ObservedAt: base, IP: netip.MustParseAddr("1.2.3.4"), Success: true, Provider: "t",
+	})
+	_ = s.InsertObservation(ctx, Observation{
+		ObservedAt: base.Add(time.Minute), IP: netip.MustParseAddr("2001:db8::1"), Success: true, Provider: "t",
+	})
+	_ = s.InsertChange(ctx, Change{
+		ChangedAt: base.Add(2 * time.Minute),
+		OldIP:     netip.MustParseAddr("1.2.3.4"),
+		NewIP:     netip.MustParseAddr("1.2.3.5"),
+	})
+	_ = s.InsertObservation(ctx, Observation{
+		ObservedAt: base.Add(2 * time.Minute), IP: netip.MustParseAddr("1.2.3.5"), Success: true, Provider: "t",
+	})
+
+	st, err := s.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.CurrentIPv4.String() != "1.2.3.5" {
+		t.Fatalf("v4 = %v", st.CurrentIPv4)
+	}
+	if st.CurrentIPv6.String() != "2001:db8::1" {
+		t.Fatalf("v6 = %v", st.CurrentIPv6)
+	}
+	if !st.HasIPv6 {
+		t.Fatal("HasIPv6 should be true")
+	}
+	if st.LastIPv4Change.IsZero() {
+		t.Fatal("expected last v4 change")
+	}
+}
+
+func TestMigrateV01Database(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v01.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmts := []string{
+		`CREATE TABLE observations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			observed_at TEXT NOT NULL, ip TEXT, provider TEXT,
+			success INTEGER NOT NULL, latency_ms INTEGER, error TEXT
+		)`,
+		`CREATE TABLE ip_changes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			changed_at TEXT NOT NULL,
+			old_ip TEXT NOT NULL, new_ip TEXT NOT NULL
+		)`,
+		`INSERT INTO observations (observed_at, ip, provider, success, latency_ms)
+		 VALUES ('2026-09-15T10:00:00Z', '1.2.3.4', 't', 1, 10)`,
+		`INSERT INTO observations (observed_at, ip, provider, success, latency_ms)
+		 VALUES ('2026-09-15T10:01:00Z', '2001:db8::9', 't', 1, 10)`,
+		`INSERT INTO ip_changes (changed_at, old_ip, new_ip)
+		 VALUES ('2026-09-15T10:01:00Z', '1.2.3.4', '1.2.3.5')`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open migrated: %v", err)
+	}
+	defer s.Close()
+
+	v4, err := s.LatestSuccess(ctx, Family4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v4 == nil || v4.IP.String() != "1.2.3.4" || v4.Family != Family4 {
+		t.Fatalf("v4 = %+v", v4)
+	}
+	v6, err := s.LatestSuccess(ctx, Family6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v6 == nil || v6.IP.String() != "2001:db8::9" || v6.Family != Family6 {
+		t.Fatalf("v6 backfill failed: %+v", v6)
+	}
+	changes, err := s.Changes(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 1 || changes[0].Family != Family4 {
+		t.Fatalf("changes = %+v", changes)
 	}
 }

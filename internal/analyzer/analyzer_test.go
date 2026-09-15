@@ -138,6 +138,52 @@ func TestAnalyzeLifecycle(t *testing.T) {
 	}
 }
 
+func TestAnalyzeMixedFamilies(t *testing.T) {
+	s := seedStore(t, []string{"1.2.3.10", "1.2.3.20"}, time.Hour)
+	ctx := context.Background()
+	base := time.Date(2026, 6, 1, 3, 0, 0, 0, time.UTC)
+	for i, ip := range []string{"2001:db8::1", "2001:db8::2"} {
+		if err := s.InsertObservation(ctx, storage.Observation{
+			ObservedAt: base.Add(time.Duration(i) * time.Hour),
+			IP:         netip.MustParseAddr(ip),
+			Provider:   "t",
+			Success:    true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.InsertChange(ctx, storage.Change{
+		ChangedAt: base.Add(time.Hour),
+		OldIP:     netip.MustParseAddr("2001:db8::1"),
+		NewIP:     netip.MustParseAddr("2001:db8::2"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Analyze(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.IPv4.HasData || !rep.IPv6.HasData {
+		t.Fatalf("both families expected: v4=%v v6=%v", rep.IPv4.HasData, rep.IPv6.HasData)
+	}
+	if rep.IPv4.UniqueIPs != 2 || rep.IPv4.ChangeCount != 1 {
+		t.Fatalf("v4 = uniq %d changes %d", rep.IPv4.UniqueIPs, rep.IPv4.ChangeCount)
+	}
+	if rep.IPv6.UniqueIPs != 2 || rep.IPv6.ChangeCount != 1 {
+		t.Fatalf("v6 = uniq %d changes %d", rep.IPv6.UniqueIPs, rep.IPv6.ChangeCount)
+	}
+	if _, ok := rep.IPv4.Prefixes[24]; !ok {
+		t.Fatal("expected v4 /24 map")
+	}
+	if _, ok := rep.IPv6.Prefixes[64]; !ok {
+		t.Fatal("expected v6 /64 map")
+	}
+	if !rep.HasIPv6 {
+		t.Fatal("HasIPv6")
+	}
+}
+
 func TestFormatDuration(t *testing.T) {
 	cases := []struct {
 		d    time.Duration

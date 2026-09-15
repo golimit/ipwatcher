@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"time"
 
+	"ipwatcher/internal/notify"
 	"ipwatcher/internal/provider"
 	"ipwatcher/internal/storage"
 )
@@ -20,23 +21,28 @@ type Options struct {
 }
 
 // Collector runs the periodic public-IP detection loop.
+// IPv4 is required each tick; IPv6 is best-effort when fo6 is set.
 type Collector struct {
-	opts     Options
-	failover *provider.Failover
-	store    *storage.Store
-	log      *slog.Logger
+	opts   Options
+	fo4    *provider.Failover
+	fo6    *provider.Failover // nil disables IPv6 collection
+	store  *storage.Store
+	log    *slog.Logger
+	notify *notify.Webhook
 }
 
-// New builds a Collector.
-func New(opts Options, failover *provider.Failover, store *storage.Store, log *slog.Logger) *Collector {
+// New builds a Collector for IPv4. fo6 may be nil.
+func New(opts Options, fo4, fo6 *provider.Failover, store *storage.Store, log *slog.Logger, hook *notify.Webhook) *Collector {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Collector{
-		opts:     opts,
-		failover: failover,
-		store:    store,
-		log:      log,
+		opts:   opts,
+		fo4:    fo4,
+		fo6:    fo6,
+		store:  store,
+		log:    log,
+		notify: hook,
 	}
 }
 
@@ -68,24 +74,75 @@ func (c *Collector) tickOnce(ctx context.Context) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	addr, prov, latency, err := c.lookupWithRetry(ctx)
+	// Writes must finish even if the process is stopping (SIGINT/SIGTERM).
+	writeCtx := context.WithoutCancel(ctx)
+
+	c.collectFamily(writeCtx, storage.Family4, c.fo4, true)
+	if c.fo6 != nil {
+		c.collectFamily(writeCtx, storage.Family6, c.fo6, false)
+	}
+}
+
+func (c *Collector) collectFamily(ctx context.Context, family byte, fo *provider.Failover, required bool) {
+	label := "ipv4"
+	if family == storage.Family6 {
+		label = "ipv6"
+	}
 
 	obs := storage.Observation{
 		ObservedAt: time.Now().UTC(),
 		Provider:   "",
-		LatencyMS:  latency,
+		Family:     family,
 	}
 
-	// Writes must finish even if the process is stopping (SIGINT/SIGTERM).
-	writeCtx := context.WithoutCancel(ctx)
+	attempts := 1
+	if required {
+		attempts = c.opts.Retries + 1
+	}
 
-	if err != nil {
-		obs.Success = false
-		obs.Error = err.Error()
-		if werr := c.store.InsertObservation(writeCtx, obs); werr != nil {
-			c.log.Error("database write failed", "error", werr.Error())
+	var (
+		addr    netip.Addr
+		prov    provider.Provider
+		latency int64
+		lastErr error
+	)
+
+	for i := 0; i < attempts; i++ {
+		if i > 0 && c.opts.RetryDelay > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(c.opts.RetryDelay):
+			}
 		}
-		c.log.Warn("public ip query failed", "error", err.Error())
+		reqCtx, cancel := context.WithTimeout(ctx, c.opts.Timeout)
+		start := time.Now()
+		var err error
+		addr, prov, err = fo.Lookup(reqCtx)
+		latency = time.Since(start).Milliseconds()
+		cancel()
+		if err == nil {
+			lastErr = nil
+			break
+		}
+		lastErr = err
+		c.log.Warn("public ip query failed", "family", label, "attempt", i+1, "error", err.Error())
+	}
+
+	obs.LatencyMS = latency
+
+	if lastErr != nil {
+		if required {
+			obs.Success = false
+			obs.Error = lastErr.Error()
+			if werr := c.store.InsertObservation(ctx, obs); werr != nil {
+				c.log.Error("database write failed", "error", werr.Error())
+			}
+			c.log.Warn("public ip query failed", "family", label, "error", lastErr.Error())
+		} else {
+			// IPv6 is best-effort: silence expected failures (no AAAA / NAT64 / etc).
+			c.log.Debug("ipv6 lookup skipped", "error", lastErr.Error())
+		}
 		return
 	}
 
@@ -93,51 +150,25 @@ func (c *Collector) tickOnce(ctx context.Context) {
 	obs.IP = addr
 	obs.Provider = prov.Name()
 
-	if werr := c.store.InsertObservation(writeCtx, obs); werr != nil {
+	if werr := c.store.InsertObservation(ctx, obs); werr != nil {
 		c.log.Error("database write failed", "error", werr.Error())
 		return
 	}
 
 	c.log.Info("public ip checked",
+		"family", label,
 		"ip", addr.String(),
 		"provider", prov.Name(),
 		"latency", fmt.Sprintf("%dms", latency),
 	)
 
-	if err := c.detectChange(writeCtx, addr, obs.ObservedAt); err != nil {
-		c.log.Error("failed to record IP change", "error", err.Error())
+	if err := c.detectChange(ctx, family, label, addr, obs.ObservedAt); err != nil {
+		c.log.Error("failed to record IP change", "family", label, "error", err.Error())
 	}
 }
 
-func (c *Collector) lookupWithRetry(ctx context.Context) (netip.Addr, provider.Provider, int64, error) {
-	attempts := c.opts.Retries + 1
-	var lastErr error
-	var latencyMS int64
-	for i := 0; i < attempts; i++ {
-		if i > 0 && c.opts.RetryDelay > 0 {
-			select {
-			case <-ctx.Done():
-				return netip.Addr{}, nil, 0, ctx.Err()
-			case <-time.After(c.opts.RetryDelay):
-			}
-		}
-
-		reqCtx, cancel := context.WithTimeout(ctx, c.opts.Timeout)
-		start := time.Now()
-		addr, prov, err := c.failover.Lookup(reqCtx)
-		latencyMS = time.Since(start).Milliseconds()
-		cancel()
-		if err == nil {
-			return addr, prov, latencyMS, nil
-		}
-		lastErr = err
-		c.log.Warn("public ip query failed", "attempt", i+1, "error", err.Error())
-	}
-	return netip.Addr{}, nil, latencyMS, lastErr
-}
-
-func (c *Collector) detectChange(ctx context.Context, newIP netip.Addr, at time.Time) error {
-	prev, err := c.store.LatestSuccessExcluding(ctx, at, newIP)
+func (c *Collector) detectChange(ctx context.Context, family byte, label string, newIP netip.Addr, at time.Time) error {
+	prev, err := c.store.LatestSuccessExcluding(ctx, at, family)
 	if err != nil {
 		return err
 	}
@@ -153,13 +184,27 @@ func (c *Collector) detectChange(ctx context.Context, newIP netip.Addr, at time.
 		ChangedAt: at,
 		OldIP:     prev.IP,
 		NewIP:     newIP,
+		Family:    family,
 	}
 	if err := c.store.InsertChange(ctx, ch); err != nil {
 		return err
 	}
 	c.log.Info("public ip changed",
+		"family", label,
 		"old", prev.IP.String(),
 		"new", newIP.String(),
 	)
+
+	if c.notify != nil {
+		ev := notify.Event{
+			Family:    label,
+			OldIP:     prev.IP.String(),
+			NewIP:     newIP.String(),
+			ChangedAt: at,
+		}
+		if nerr := c.notify.Send(ctx, ev); nerr != nil {
+			c.log.Warn("webhook notify failed", "error", nerr.Error())
+		}
+	}
 	return nil
 }
