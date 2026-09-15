@@ -47,12 +47,16 @@ func main() {
 		os.Exit(cmdAnalyze(rest))
 	case "purge":
 		os.Exit(cmdPurge(rest))
+	case "ignore":
+		os.Exit(cmdIgnore(rest))
 	case "last":
 		os.Exit(cmdLast(rest))
 	case "check":
 		os.Exit(cmdCheck(rest))
 	case "export":
 		os.Exit(cmdExport(rest))
+	case "config":
+		os.Exit(cmdConfigShow(rest))
 	case "version", "-v", "--version":
 		fmt.Printf("ipwatcher %s\n", version)
 	case "help", "-h", "--help":
@@ -74,17 +78,25 @@ Usage:
   ipwatcher history  Show IP change history
   ipwatcher analyze  Show prefix distribution and lifecycle stats
   ipwatcher purge    Remove observations/changes for bad IPs or CIDRs
+  ipwatcher ignore   List/add/remove permanent ignore rules (stored in DB)
   ipwatcher check    Probe configured providers once
   ipwatcher export   Dump observations or changes as CSV/JSON
+  ipwatcher config   Show effective runtime config
   ipwatcher version  Print version
 
 Global flags (after subcommand):
   -config string   Path to YAML config (default: ./config.yaml)
   -json            JSON output (status/history/analyze/last)
 
+ignore subcommands:
+  ipwatcher ignore list
+  ipwatcher ignore add <ip|cidr> [more...]
+  ipwatcher ignore remove <ip|cidr> [more...]
+
 purge flags:
   -ip string       IP(s) to delete, comma-separated
   -cidr string     CIDR(s) to delete, comma-separated
+  -also-ignore     Also add the same targets to the permanent ignore list
   -dry-run         Show what would be deleted without writing
 
 export flags:
@@ -97,7 +109,7 @@ Environment overrides:
   IPWATCHER_INTERVAL, IPWATCHER_TIMEOUT, IPWATCHER_RETRIES,
   IPWATCHER_RETRY_DELAY, IPWATCHER_DB_PATH, IPWATCHER_LOG_LEVEL,
   IPWATCHER_PROVIDERS, IPWATCHER_PROVIDERS_V6,
-  IPWATCHER_IGNORE_IPS (IP or CIDR, comma-separated),
+  IPWATCHER_IGNORE_IPS (extra IP/CIDR, merged with DB rules),
   IPWATCHER_WEBHOOK_URL, IPWATCHER_WEBHOOK_TIMEOUT
 `, version)
 }
@@ -117,8 +129,20 @@ func openStore(ctx context.Context, cfg config.Config) (*storage.Store, error) {
 	return storage.Open(ctx, cfg.Database.Path)
 }
 
-func buildFilters(cfg config.Config) (*config.IgnoreFilter, *provider.Failover, *provider.Failover, error) {
-	filter, err := config.ParseIgnoreFilter(cfg.IgnoreIPs)
+// buildMergedIgnore combines DB-managed rules with config/env extras.
+func buildMergedIgnore(ctx context.Context, store *storage.Store, cfg config.Config) (*config.IgnoreFilter, error) {
+	dbRules, err := store.IgnoreRuleStrings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]string, 0, len(dbRules)+len(cfg.IgnoreIPs))
+	entries = append(entries, dbRules...)
+	entries = append(entries, cfg.IgnoreIPs...)
+	return config.ParseIgnoreFilter(entries)
+}
+
+func buildFilters(ctx context.Context, store *storage.Store, cfg config.Config) (*config.IgnoreFilter, *provider.Failover, *provider.Failover, error) {
+	filter, err := buildMergedIgnore(ctx, store, cfg)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -159,18 +183,19 @@ func cmdRun(args []string) int {
 		}
 	}()
 
-	filter, fo4, fo6, err := buildFilters(cfg)
+	filter, fo4, fo6, err := buildFilters(ctx, store, cfg)
 	if err != nil {
-		log.Error("invalid ignore_ips", "error", err.Error())
+		log.Error("invalid ignore rules", "error", err.Error())
 		return 1
 	}
 	hook := notify.New(cfg.Notify.WebhookURL, cfg.Notify.Timeout)
 
 	col := collector.New(collector.Options{
-		Interval:   cfg.Collector.Interval,
-		Timeout:    cfg.Collector.Timeout,
-		Retries:    cfg.Collector.Retries,
-		RetryDelay: cfg.Collector.RetryDelay,
+		Interval:    cfg.Collector.Interval,
+		Timeout:     cfg.Collector.Timeout,
+		Retries:     cfg.Collector.Retries,
+		RetryDelay:  cfg.Collector.RetryDelay,
+		ExtraIgnore: cfg.IgnoreIPs,
 	}, fo4, fo6, store, log, hook)
 
 	log.Info("ipwatcher started",
@@ -557,6 +582,7 @@ func cmdPurge(args []string) int {
 	cfgPath := fs.String("config", "config.yaml", "path to YAML config file")
 	ipList := fs.String("ip", "", "IP address(es) to delete, comma-separated")
 	cidrList := fs.String("cidr", "", "CIDR prefix(es) to delete, comma-separated")
+	alsoIgnore := fs.Bool("also-ignore", false, "also add targets to the permanent ignore list")
 	dryRun := fs.Bool("dry-run", false, "show what would be deleted without writing")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -590,6 +616,9 @@ func cmdPurge(args []string) int {
 		for _, p := range prefixes {
 			fmt.Printf("would purge CIDR %s\n", p)
 		}
+		if *alsoIgnore {
+			fmt.Println("would add the same targets to ignore_rules")
+		}
 		return 0
 	}
 
@@ -615,6 +644,262 @@ func cmdPurge(args []string) int {
 		fmt.Printf("purged %s: %d observation(s), %d change(s)\n", p, obs, chg)
 	}
 	fmt.Printf("total: %d observation(s), %d change(s) removed\n", totalObs, totalChg)
+
+	if *alsoIgnore {
+		for _, ip := range ips {
+			added, err := store.AddIgnoreRule(ctx, ip.String())
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to ignore %s: %v\n", ip, err)
+				return 1
+			}
+			if added {
+				fmt.Printf("ignored %s (permanent)\n", ip)
+			} else {
+				fmt.Printf("ignored %s (already present)\n", ip)
+			}
+		}
+		for _, p := range prefixes {
+			added, err := store.AddIgnoreRule(ctx, p.String())
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to ignore %s: %v\n", p, err)
+				return 1
+			}
+			if added {
+				fmt.Printf("ignored %s (permanent)\n", p)
+			} else {
+				fmt.Printf("ignored %s (already present)\n", p)
+			}
+		}
+	}
+	return 0
+}
+
+func cmdIgnore(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: ipwatcher ignore list|add|remove ...")
+		return 2
+	}
+	sub := args[0]
+	rest := args[1:]
+
+	flagArgs, targets := splitCLIArgs(rest, map[string]bool{"config": true, "json": false})
+
+	fs := flag.NewFlagSet("ignore", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	cfgPath := fs.String("config", "config.yaml", "path to YAML config file")
+	asJSON := fs.Bool("json", false, "JSON output (list)")
+	if err := fs.Parse(flagArgs); err != nil {
+		return 2
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		return 1
+	}
+	ctx := context.Background()
+	store, err := openStore(ctx, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize database: %v\n", err)
+		return 1
+	}
+	defer func() { _ = store.Close() }()
+
+	switch sub {
+	case "list":
+		rules, err := store.ListIgnoreRules(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to list ignore rules: %v\n", err)
+			return 1
+		}
+		if *asJSON {
+			type row struct {
+				Rule      string `json:"rule"`
+				CreatedAt string `json:"created_at"`
+			}
+			out := make([]row, 0, len(rules))
+			for _, r := range rules {
+				out = append(out, row{Rule: r.Rule, CreatedAt: r.CreatedAt.Local().Format(time.RFC3339)})
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(out)
+			return 0
+		}
+		if len(rules) == 0 {
+			fmt.Println("No permanent ignore rules. Add with: ipwatcher ignore add <ip|cidr>")
+			if len(cfg.IgnoreIPs) > 0 {
+				fmt.Println("Config/env extras (not stored in DB):")
+				for _, e := range cfg.IgnoreIPs {
+					fmt.Printf("  %s\n", e)
+				}
+			}
+			return 0
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "RULE\tCREATED")
+		for _, r := range rules {
+			fmt.Fprintf(w, "%s\t%s\n", r.Rule, r.CreatedAt.Local().Format("2006-01-02 15:04"))
+		}
+		w.Flush()
+		if len(cfg.IgnoreIPs) > 0 {
+			fmt.Println("\nConfig/env extras (merged at runtime, not in DB):")
+			for _, e := range cfg.IgnoreIPs {
+				fmt.Printf("  %s\n", e)
+			}
+		}
+		return 0
+	case "add":
+		if len(targets) == 0 {
+			fmt.Fprintln(os.Stderr, "ignore add requires at least one IP or CIDR")
+			return 2
+		}
+		for _, t := range targets {
+			if _, err := config.ParseIPOrPrefix(t); err != nil {
+				fmt.Fprintf(os.Stderr, "invalid IP/CIDR %q: %v\n", t, err)
+				return 2
+			}
+			added, err := store.AddIgnoreRule(ctx, t)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to add %s: %v\n", t, err)
+				return 1
+			}
+			if added {
+				fmt.Printf("added %s\n", t)
+			} else {
+				fmt.Printf("already present %s\n", t)
+			}
+		}
+		fmt.Println("Collector picks this up on the next tick (no restart needed).")
+		return 0
+	case "remove", "rm", "del":
+		if len(targets) == 0 {
+			fmt.Fprintln(os.Stderr, "ignore remove requires at least one IP or CIDR")
+			return 2
+		}
+		for _, t := range targets {
+			removed, err := store.RemoveIgnoreRule(ctx, t)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to remove %s: %v\n", t, err)
+				return 1
+			}
+			if removed {
+				fmt.Printf("removed %s\n", t)
+			} else {
+				fmt.Printf("not found %s\n", t)
+			}
+		}
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "unknown ignore subcommand %q (want list|add|remove)\n", sub)
+		return 2
+	}
+}
+
+// splitCLIArgs separates flags (with optional values) from positional args
+// so flags may appear before or after targets.
+func splitCLIArgs(args []string, valueFlags map[string]bool) (flagArgs, posArgs []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			posArgs = append(posArgs, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			posArgs = append(posArgs, a)
+			continue
+		}
+		flagArgs = append(flagArgs, a)
+		name := strings.TrimLeft(a, "-")
+		if eq := strings.IndexByte(name, '='); eq >= 0 {
+			continue
+		}
+		if valueFlags[name] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			flagArgs = append(flagArgs, args[i+1])
+			i++
+		}
+	}
+	return flagArgs, posArgs
+}
+
+func cmdConfigShow(args []string) int {
+	fs := flag.NewFlagSet("config", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	cfgPath := fs.String("config", "config.yaml", "path to YAML config file")
+	asJSON := fs.Bool("json", false, "JSON output")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	// support: ipwatcher config show
+	if sub := fs.Args(); len(sub) > 0 && sub[0] != "show" {
+		fmt.Fprintf(os.Stderr, "usage: ipwatcher config [-json]\n")
+		return 2
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		return 1
+	}
+	ctx := context.Background()
+	store, err := openStore(ctx, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize database: %v\n", err)
+		return 1
+	}
+	defer func() { _ = store.Close() }()
+	dbRules, _ := store.IgnoreRuleStrings(ctx)
+	filter, err := buildMergedIgnore(ctx, store, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ignore rules error: %v\n", err)
+		return 1
+	}
+
+	if *asJSON {
+		payload := map[string]any{
+			"db_path":      cfg.Database.Path,
+			"interval":     cfg.Collector.Interval.String(),
+			"timeout":      cfg.Collector.Timeout.String(),
+			"retries":      cfg.Collector.Retries,
+			"retry_delay":  cfg.Collector.RetryDelay.String(),
+			"log_level":    cfg.Logging.Level,
+			"providers":    cfg.Providers,
+			"providers_v6": cfg.Providers6,
+			"ignore_db":    dbRules,
+			"ignore_extra": cfg.IgnoreIPs,
+			"ignore_total": filter.Len(),
+			"webhook_set":  cfg.Notify.WebhookURL != "",
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(payload)
+		return 0
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "Database:\t%s\n", cfg.Database.Path)
+	fmt.Fprintf(w, "Interval:\t%s\n", cfg.Collector.Interval)
+	fmt.Fprintf(w, "Timeout:\t%s\n", cfg.Collector.Timeout)
+	fmt.Fprintf(w, "Retries:\t%d\n", cfg.Collector.Retries)
+	fmt.Fprintf(w, "Log level:\t%s\n", cfg.Logging.Level)
+	fmt.Fprintf(w, "Providers:\t%d\n", len(cfg.Providers))
+	for _, p := range cfg.Providers {
+		fmt.Fprintf(w, "  -\t%s\n", p)
+	}
+	fmt.Fprintf(w, "Providers v6:\t%d\n", len(cfg.Providers6))
+	for _, p := range cfg.Providers6 {
+		fmt.Fprintf(w, "  -\t%s\n", p)
+	}
+	fmt.Fprintf(w, "Ignore (DB):\t%d\n", len(dbRules))
+	for _, r := range dbRules {
+		fmt.Fprintf(w, "  -\t%s\n", r)
+	}
+	fmt.Fprintf(w, "Ignore (config/env):\t%d\n", len(cfg.IgnoreIPs))
+	for _, r := range cfg.IgnoreIPs {
+		fmt.Fprintf(w, "  -\t%s\n", r)
+	}
+	fmt.Fprintf(w, "Ignore (effective):\t%d\n", filter.Len())
+	fmt.Fprintf(w, "Webhook:\t%s\n", map[bool]string{true: "configured", false: "disabled"}[cfg.Notify.WebhookURL != ""])
+	w.Flush()
 	return 0
 }
 
@@ -630,13 +915,19 @@ func cmdCheck(args []string) int {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		return 1
 	}
-	filter, _, _, err := buildFilters(cfg)
+	ctx := context.Background()
+	store, err := openStore(ctx, cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ignore_ips error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to initialize database: %v\n", err)
+		return 1
+	}
+	defer func() { _ = store.Close() }()
+	filter, _, _, err := buildFilters(ctx, store, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ignore rules error: %v\n", err)
 		return 1
 	}
 
-	ctx := context.Background()
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "FAMILY\tPROVIDER\tRESULT\tDETAIL")
 

@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"ipwatcher/internal/config"
 	"ipwatcher/internal/notify"
 	"ipwatcher/internal/provider"
 	"ipwatcher/internal/storage"
@@ -138,35 +137,35 @@ func TestTickOnceFailureDoesNotPanic(t *testing.T) {
 
 func TestTickOnceSkipsIgnoredIP(t *testing.T) {
 	var current atomic.Value
-	current.Store("154.3.34.66")
+	current.Store("203.0.113.66")
 	srvBad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(current.Load().(string)))
 	}))
 	defer srvBad.Close()
 
 	srvGood := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("120.229.60.138"))
+		_, _ = w.Write([]byte("198.51.100.10"))
 	}))
 	defer srvGood.Close()
 
-	filter, err := config.ParseIgnoreFilter([]string{"154.3.34.0/24"})
-	if err != nil {
-		t.Fatal(err)
-	}
 	store := openStore(t)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	fo := provider.NewFailover(
 		provider.NewHTTPProvider(srvBad.URL, srvBad.Client()),
 		provider.NewHTTPProvider(srvGood.URL, srvGood.Client()),
-	).WithFilter(filter)
-	col := newCol(store, fo, nil)
+	)
+	col := New(Options{
+		Interval: time.Minute, Timeout: 2 * time.Second, Retries: 0, RetryDelay: 0,
+		ExtraIgnore: []string{"203.0.113.0/24"},
+	}, fo, nil, store, log, nil)
 	col.TickOnce(context.Background())
 
 	obs, err := store.LatestSuccess(context.Background(), storage.Family4)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if obs == nil || obs.IP.String() != "120.229.60.138" {
-		t.Fatalf("obs = %+v, want 120.229.60.138", obs)
+	if obs == nil || obs.IP.String() != "198.51.100.10" {
+		t.Fatalf("obs = %+v, want 198.51.100.10", obs)
 	}
 }
 
@@ -206,9 +205,43 @@ func TestTickOnceIPv6BestEffort(t *testing.T) {
 	col2.TickOnce(ctx)
 	after, _ := store.LatestObservation(ctx)
 	if after != nil && before != nil && after.ID == before.ID {
-		// no new rows — good
+		// no new rows �?good
 	} else if after != nil && !after.Success && after.Family == storage.Family6 {
 		t.Fatal("ipv6 failure should not write failure observation")
+	}
+}
+
+func TestIgnoreRuleFromDBAppliesWithoutRestart(t *testing.T) {
+	var current atomic.Value
+	current.Store("203.0.113.66")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(current.Load().(string)))
+	}))
+	defer srv.Close()
+
+	store := openStore(t)
+	ctx := context.Background()
+	// No filter yet: bogus IP is recorded.
+	fo := provider.NewFailover(provider.NewHTTPProvider(srv.URL, srv.Client()))
+	col := newCol(store, fo, nil)
+	col.TickOnce(ctx)
+	obs, _ := store.LatestSuccess(ctx, storage.Family4)
+	if obs == nil || obs.IP.String() != "203.0.113.66" {
+		t.Fatalf("first obs = %+v", obs)
+	}
+
+	// CLI adds a permanent rule; next tick must skip it (treat as failure).
+	if _, err := store.AddIgnoreRule(ctx, "203.0.113.0/24"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	col.TickOnce(ctx)
+	latest, _ := store.LatestObservation(ctx)
+	if latest == nil || latest.Success {
+		t.Fatalf("expected failure observation after ignore, got %+v", latest)
+	}
+	if latest.Error == "" {
+		t.Fatal("expected error text on ignored lookup")
 	}
 }
 

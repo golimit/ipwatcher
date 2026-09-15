@@ -45,6 +45,13 @@ type Change struct {
 	Family    byte
 }
 
+// IgnoreRule is one permanent filter entry managed via CLI (stored in DB).
+type IgnoreRule struct {
+	ID        int64
+	Rule      string // IP or CIDR, as entered
+	CreatedAt time.Time
+}
+
 // Open creates parent directories if needed and migrates schema.
 func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
@@ -93,6 +100,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			family TEXT NOT NULL DEFAULT '4'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_chg_time ON ip_changes(changed_at)`,
+		`CREATE TABLE IF NOT EXISTS ignore_rules (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			rule TEXT NOT NULL UNIQUE,
+			created_at TEXT NOT NULL
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -356,6 +368,78 @@ func (s *Store) DeletePrefix(ctx context.Context, prefix netip.Prefix) (obsRemov
 		}
 	}
 	return obsRemoved, changesRemoved, nil
+}
+
+// AddIgnoreRule stores a permanent ignore rule (IP or CIDR text).
+// Returns false when the rule already exists.
+func (s *Store) AddIgnoreRule(ctx context.Context, rule string) (bool, error) {
+	rule = strings.TrimSpace(rule)
+	if rule == "" {
+		return false, fmt.Errorf("ignore rule is empty")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO ignore_rules (rule, created_at) VALUES (?, ?)`,
+		rule, time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return false, fmt.Errorf("failed to add ignore rule: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// RemoveIgnoreRule deletes a permanent ignore rule. Returns false if absent.
+func (s *Store) RemoveIgnoreRule(ctx context.Context, rule string) (bool, error) {
+	rule = strings.TrimSpace(rule)
+	if rule == "" {
+		return false, fmt.Errorf("ignore rule is empty")
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM ignore_rules WHERE rule = ?`, rule)
+	if err != nil {
+		return false, fmt.Errorf("failed to remove ignore rule: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ListIgnoreRules returns all permanent ignore rules oldest-first.
+func (s *Store) ListIgnoreRules(ctx context.Context) ([]IgnoreRule, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, rule, created_at FROM ignore_rules ORDER BY created_at ASC, id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ignore rules: %w", err)
+	}
+	defer rows.Close()
+	var out []IgnoreRule
+	for rows.Next() {
+		var (
+			r  IgnoreRule
+			ts string
+		)
+		if err := rows.Scan(&r.ID, &r.Rule, &ts); err != nil {
+			return nil, fmt.Errorf("failed to scan ignore rule: %w", err)
+		}
+		t, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ignore rule timestamp %q: %w", ts, err)
+		}
+		r.CreatedAt = t.UTC()
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// IgnoreRuleStrings returns just the rule texts (for filter building).
+func (s *Store) IgnoreRuleStrings(ctx context.Context) ([]string, error) {
+	rules, err := s.ListIgnoreRules(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, r.Rule)
+	}
+	return out, nil
 }
 
 // LatestSuccess returns the most recent successful observation for a family.

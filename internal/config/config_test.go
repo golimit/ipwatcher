@@ -55,8 +55,8 @@ providers:
 providers_v6:
   - https://ipv6.example.com/ip
 ignore_ips:
-  - 154.3.34.66
-  - 154.3.0.0/16
+  - 203.0.113.66
+  - 203.0.113.0/24
 notify:
   webhook_url: https://hooks.example/x
 `
@@ -178,8 +178,8 @@ func TestValidateRejectsBadWebhook(t *testing.T) {
 
 func TestParseIgnoreFilterCIDR(t *testing.T) {
 	f, err := ParseIgnoreFilter([]string{
-		"154.3.34.66",
-		"154.3.0.0/16",
+		"203.0.113.66",
+		"203.0.113.0/24",
 		"2001:db8::1",
 		"2001:db8::/32",
 	})
@@ -193,10 +193,10 @@ func TestParseIgnoreFilterCIDR(t *testing.T) {
 		ip   string
 		want bool
 	}{
-		{"154.3.34.66", true},
-		{"154.3.99.1", true},
+		{"203.0.113.66", true},
+		{"203.0.113.99", true},
 		{"154.4.0.1", false},
-		{"120.229.60.138", false},
+		{"198.51.100.10", false},
 		{"2001:db8::1", true},
 		{"2001:db8:1::1", true},
 		{"2001:db9::1", false},

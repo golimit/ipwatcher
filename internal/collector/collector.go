@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"time"
 
+	"ipwatcher/internal/config"
 	"ipwatcher/internal/notify"
 	"ipwatcher/internal/provider"
 	"ipwatcher/internal/storage"
@@ -18,6 +19,8 @@ type Options struct {
 	Timeout    time.Duration
 	Retries    int
 	RetryDelay time.Duration
+	// ExtraIgnore merges config/env ignore entries with DB-managed rules.
+	ExtraIgnore []string
 }
 
 // Collector runs the periodic public-IP detection loop.
@@ -77,9 +80,36 @@ func (c *Collector) tickOnce(ctx context.Context) {
 	// Writes must finish even if the process is stopping (SIGINT/SIGTERM).
 	writeCtx := context.WithoutCancel(ctx)
 
+	c.refreshIgnoreFilter(writeCtx)
+
 	c.collectFamily(writeCtx, storage.Family4, c.fo4, true)
 	if c.fo6 != nil {
 		c.collectFamily(writeCtx, storage.Family6, c.fo6, false)
+	}
+}
+
+// refreshIgnoreFilter reloads DB-managed rules (+ config extras) each tick so
+// `ipwatcher ignore add` applies without restarting the collector.
+func (c *Collector) refreshIgnoreFilter(ctx context.Context) {
+	if c.fo4 == nil {
+		return
+	}
+	dbRules, err := c.store.IgnoreRuleStrings(ctx)
+	if err != nil {
+		c.log.Warn("failed to load ignore rules from database", "error", err.Error())
+		dbRules = nil
+	}
+	entries := make([]string, 0, len(dbRules)+len(c.opts.ExtraIgnore))
+	entries = append(entries, dbRules...)
+	entries = append(entries, c.opts.ExtraIgnore...)
+	filter, err := config.ParseIgnoreFilter(entries)
+	if err != nil {
+		c.log.Warn("invalid ignore rule, skipping refresh", "error", err.Error())
+		return
+	}
+	c.fo4.WithFilter(filter)
+	if c.fo6 != nil {
+		c.fo6.WithFilter(filter)
 	}
 }
 

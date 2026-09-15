@@ -183,8 +183,8 @@ func TestLatestSuccessExcluding(t *testing.T) {
 func TestDeleteIP(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
-	bad := netip.MustParseAddr("154.3.34.66")
-	good := netip.MustParseAddr("120.229.60.138")
+	bad := netip.MustParseAddr("203.0.113.66")
+	good := netip.MustParseAddr("198.51.100.10")
 	base := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
 
 	for i, ip := range []netip.Addr{bad, good, good} {
@@ -207,7 +207,7 @@ func TestDeleteIP(t *testing.T) {
 	if err := s.InsertChange(ctx, Change{
 		ChangedAt: base.Add(5 * time.Minute),
 		OldIP:     good,
-		NewIP:     netip.MustParseAddr("120.229.60.200"),
+		NewIP:     netip.MustParseAddr("198.51.100.200"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestDeletePrefix(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
 
-	for i, ip := range []string{"154.3.34.66", "154.3.34.80", "120.229.60.138"} {
+	for i, ip := range []string{"203.0.113.66", "203.0.113.80", "198.51.100.10"} {
 		if err := s.InsertObservation(ctx, Observation{
 			ObservedAt: base.Add(time.Duration(i) * time.Minute),
 			IP:         netip.MustParseAddr(ip),
@@ -263,13 +263,13 @@ func TestDeletePrefix(t *testing.T) {
 	}
 	if err := s.InsertChange(ctx, Change{
 		ChangedAt: base.Add(3 * time.Minute),
-		OldIP:     netip.MustParseAddr("154.3.34.66"),
-		NewIP:     netip.MustParseAddr("120.229.60.138"),
+		OldIP:     netip.MustParseAddr("203.0.113.66"),
+		NewIP:     netip.MustParseAddr("198.51.100.10"),
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	obs, chg, err := s.DeletePrefix(ctx, netip.MustParsePrefix("154.3.34.0/24"))
+	obs, chg, err := s.DeletePrefix(ctx, netip.MustParsePrefix("203.0.113.0/24"))
 	if err != nil {
 		t.Fatalf("DeletePrefix: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestDeletePrefix(t *testing.T) {
 	if len(uniq) != 1 {
 		t.Fatalf("unique = %d, want 1", len(uniq))
 	}
-	if _, ok := uniq[netip.MustParseAddr("120.229.60.138")]; !ok {
+	if _, ok := uniq[netip.MustParseAddr("198.51.100.10")]; !ok {
 		t.Fatal("good IP missing")
 	}
 }
@@ -416,5 +416,53 @@ func TestMigrateV01Database(t *testing.T) {
 	}
 	if len(changes) != 1 || changes[0].Family != Family4 {
 		t.Fatalf("changes = %+v", changes)
+	}
+}
+
+func TestIgnoreRulesCRUD(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	added, err := s.AddIgnoreRule(ctx, "203.0.113.66")
+	if err != nil || !added {
+		t.Fatalf("add1: added=%v err=%v", added, err)
+	}
+	added, err = s.AddIgnoreRule(ctx, "203.0.113.66")
+	if err != nil || added {
+		t.Fatalf("dup should be ignored: added=%v err=%v", added, err)
+	}
+	if _, err := s.AddIgnoreRule(ctx, "203.0.113.0/24"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddIgnoreRule(ctx, "2001:db8::/32"); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, err := s.ListIgnoreRules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 3 {
+		t.Fatalf("rules = %d, want 3", len(rules))
+	}
+	strs, err := s.IgnoreRuleStrings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(strs) != 3 {
+		t.Fatalf("strings = %v", strs)
+	}
+
+	removed, err := s.RemoveIgnoreRule(ctx, "203.0.113.66")
+	if err != nil || !removed {
+		t.Fatalf("remove: removed=%v err=%v", removed, err)
+	}
+	removed, err = s.RemoveIgnoreRule(ctx, "203.0.113.66")
+	if err != nil || removed {
+		t.Fatalf("second remove should be false: %v %v", removed, err)
+	}
+	rules, _ = s.ListIgnoreRules(ctx)
+	if len(rules) != 2 {
+		t.Fatalf("after remove = %d", len(rules))
 	}
 }

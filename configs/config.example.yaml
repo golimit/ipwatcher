@@ -23,14 +23,15 @@ providers_v6:
   - https://api6.ipify.org
   - https://6.ident.me
 
-# Never record these addresses/ranges (captive portal, known-bad providers).
-# Accepts single IP or CIDR, IPv4 and IPv6.
-ignore_ips:
-  - 154.3.34.66
-  # - 154.3.0.0/16
-  # - 2001:db8::/32
+# Permanent ignore rules are managed at runtime (stored in SQLite, not this file):
+#   ipwatcher ignore list
+#   ipwatcher ignore add 203.0.113.66
+#   ipwatcher ignore add 203.0.113.0/24
+#   ipwatcher purge -cidr 203.0.113.0/24 --also-ignore
+# Optional one-off extras (merged with DB rules; do not commit real IPs here):
+# ignore_ips: []
 
-# Optional: POST JSON on IP change. Failures only log a warning.
+# Optional: POST JSON on IP change. Prefer env IPWATCHER_WEBHOOK_URL for secrets.
 # notify:
 #   webhook_url: https://example.com/hooks/ipwatcher
 #   timeout: 5s

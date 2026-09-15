@@ -159,15 +159,15 @@ func (f staticFilter) Contains(a netip.Addr) bool {
 
 func TestFailoverSkipsFilteredIP(t *testing.T) {
 	bogus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("154.3.34.66"))
+		_, _ = w.Write([]byte("203.0.113.66"))
 	}))
 	defer bogus.Close()
 	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("120.229.60.138"))
+		_, _ = w.Write([]byte("198.51.100.10"))
 	}))
 	defer good.Close()
 
-	filter := staticFilter{netip.MustParseAddr("154.3.34.66"): {}}
+	filter := staticFilter{netip.MustParseAddr("203.0.113.66"): {}}
 	fo := NewFailover(
 		NewHTTPProvider(bogus.URL, bogus.Client()),
 		NewHTTPProvider(good.URL, good.Client()),
@@ -177,18 +177,18 @@ func TestFailoverSkipsFilteredIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
-	if addr.String() != "120.229.60.138" {
+	if addr.String() != "198.51.100.10" {
 		t.Fatalf("addr = %v", addr)
 	}
 }
 
 func TestFailoverAllIgnored(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("154.3.34.66"))
+		_, _ = w.Write([]byte("203.0.113.66"))
 	}))
 	defer srv.Close()
 
-	filter := staticFilter{netip.MustParseAddr("154.3.34.66"): {}}
+	filter := staticFilter{netip.MustParseAddr("203.0.113.66"): {}}
 	fo := NewFailover(NewHTTPProvider(srv.URL, srv.Client())).WithFilter(filter)
 
 	_, _, err := fo.Lookup(context.Background())
