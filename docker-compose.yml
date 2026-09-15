@@ -1,0 +1,15 @@
+services:
+  ipwatcher:
+    build: .
+    image: ipwatcher:0.1.0
+    container_name: ipwatcher
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    environment:
+      IPWATCHER_INTERVAL: 5m
+      IPWATCHER_TIMEOUT: 5s
+      IPWATCHER_RETRIES: "2"
+      IPWATCHER_RETRY_DELAY: 2s
+      IPWATCHER_DB_PATH: /app/data/ipwatcher.db
+      IPWATCHER_LOG_LEVEL: info
