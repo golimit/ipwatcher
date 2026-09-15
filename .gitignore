@@ -1,6 +1,6 @@
-# Binaries
-ipwatcher
-ipwatcher.exe
+# Binaries (root-level only; do not ignore cmd/ipwatcher/)
+/ipwatcher
+/ipwatcher.exe
 
 # Data
 data/
