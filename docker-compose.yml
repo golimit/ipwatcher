@@ -1,7 +1,7 @@
 services:
   ipwatcher:
     build: .
-    image: ipwatcher:0.1.0
+    image: ghcr.io/golimit/ipwatcher:0.1.0
     container_name: ipwatcher
     restart: unless-stopped
     volumes:

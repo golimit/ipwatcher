@@ -1,0 +1,32 @@
+# Build context excludes
+.git
+.github
+.idea
+.vscode
+
+# Local data & config
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+config.yaml
+
+# Binaries & artifacts
+ipwatcher
+ipwatcher.exe
+ipwatcher-*
+dist/
+*.exe
+*.test
+*.out
+coverage.*
+*.log
+
+# Docs not needed in image
+docs/
+plan.md
+README.md
+LICENSE
+Makefile
+docker-compose.yml

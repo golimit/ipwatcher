@@ -41,9 +41,29 @@ cp configs/config.example.yaml config.yaml
 
 ### Docker
 
+镜像由 GitHub Actions 自动构建并发布到 GitHub Container Registry（`ghcr.io`）。
+
+**直接拉取已发布镜像：**
+
+```bash
+docker pull ghcr.io/golimit/ipwatcher:latest
+# 或指定版本
+docker pull ghcr.io/golimit/ipwatcher:0.1.0
+```
+
+**本地构建并启动：**
+
 ```bash
 docker compose up -d
 # 数据持久化在 ./data/
+```
+
+查看子命令时，注意 `docker exec` 不会走镜像的 `ENTRYPOINT`，需要显式写出容器内的二进制名：
+
+```bash
+docker compose exec ipwatcher ipwatcher status
+docker compose exec ipwatcher ipwatcher history
+docker compose exec ipwatcher ipwatcher analyze
 ```
 
 ## 配置
