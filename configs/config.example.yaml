@@ -1,0 +1,16 @@
+collector:
+  interval: 5m
+  timeout: 5s
+  retries: 2
+  retry_delay: 2s
+
+database:
+  path: ./data/ipwatcher.db
+
+logging:
+  level: info
+
+providers:
+  - https://api.ipify.org
+  - https://icanhazip.com
+  - https://ifconfig.me/ip

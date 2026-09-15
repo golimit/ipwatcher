@@ -1,0 +1,23 @@
+# Binaries
+ipwatcher
+ipwatcher.exe
+
+# Data
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Local config (keep example)
+config.yaml
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
