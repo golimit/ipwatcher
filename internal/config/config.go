@@ -49,8 +49,8 @@ func Default() Config {
 		},
 		// Prefer IPv4-only hostnames so dual-stack networks still see IPv4.
 		Providers: []string{
-			"https://api.ipify.org",
 			"https://ipv4.icanhazip.com",
+			"https://api.ipify.org",
 			"https://4.ident.me",
 		},
 	}

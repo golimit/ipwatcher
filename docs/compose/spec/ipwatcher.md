@@ -54,7 +54,7 @@ type Provider interface {
 }
 ```
 
-- 默认内置：ipify、ipv4.icanhazip.com、4.ident.me（HTTPS，返回纯文本 IPv4）。共享 `http.Client` 强制 `tcp4` 拨号，避免双栈网络返回出口 IPv6。
+- 默认内置：ipv4.icanhazip.com、ipify、4.ident.me（HTTPS，返回纯文本 IPv4，按此顺序 failover）。共享 `http.Client` 强制 `tcp4` 拨号，避免双栈网络返回出口 IPv6。
 - Failover：按配置顺序依次尝试；单次失败→下一 Provider；全部失败记 WARN 并等下一周期。
 - 必须用 `net/netip` 校验合法 IPv4；仅接受 IPv4。
 
@@ -124,8 +124,8 @@ database:
 logging:
   level: info   # debug|info|warn|error
 providers:
-  - https://api.ipify.org
   - https://ipv4.icanhazip.com
+  - https://api.ipify.org
   - https://4.ident.me
 ```
 

@@ -66,8 +66,8 @@ logging:
   level: info   # debug|info|warn|error
 
 providers:
-  - https://api.ipify.org
   - https://ipv4.icanhazip.com
+  - https://api.ipify.org
   - https://4.ident.me
 ```
 
