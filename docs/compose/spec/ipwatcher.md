@@ -1,14 +1,25 @@
 ---
 feature: ipwatcher
-status: in-progress
+status: delivered
 updated: 2026-09-16
 branch: feat/ipwatcher-v0.1.0
-commits: (pending)
+commits: 449a4fe..c3aa3c3
 ---
 
 # ipwatcher — 动态出口 IP 采集与网段分析工具
 
 ## Report
+
+**What was built** — 首版可长期运行的公网出口 IPv4 采集 CLI：`run` 按 interval（默认 5m）轮询多 Provider（failover + 重试），成功/失败均写入 SQLite `observations`，IP 变化写入 `ip_changes`；SIGINT/SIGTERM 停止新轮次并用 `context.WithoutCancel` 完成在途写入。`status` / `history` / `analyze` 分别输出当前状态、变更历史、/24–/20 观察网段分布与已结束生命周期统计。配置支持 YAML + `IPWATCHER_*` 环境变量；时间库内 UTC、展示本地时区；IP/CIDR 一律 `net/netip`。
+
+**Verification** — `gofmt -l .` 空；`go vet ./...` 干净；`go test ./... -count=1` 全绿（analyzer/collector/config/provider/storage）。独立审查（449a4fe..d2517ff）：Spec PASS、Consistency PASS、Critical none；Correctness 指出 4 项已在 c3aa3c3 修复（优雅写完在途记录、latency 不含重试等待、YAML `retries: 0` 生效、未结束 IP 段不计入 min/max/avg）。本地 CLI 冒烟：假 Provider 下 `run`/`status`/`history`/`analyze` 输出符合 plan §11。
+
+**Journey log** — 
+- `.gitignore` 中的 `ipwatcher` 误匹配了 `cmd/ipwatcher/` 源码目录，已改为 `/ipwatcher` 仅根二进制。
+- YAML 零值合并不能区分「未写」与「显式 0」，改为指针化 `fileConfig` 解析。
+- 优雅退出不能复用被 cancel 的主 ctx 做 DB 写入，需 `context.WithoutCancel`。
+- 生命周期统计应只累计已切换完成的 IP 段，开放中的当前段会把 Min 拉成 0。
+- 审查子代理两次卡住：范围收窄（只 diff 修复提交）后仍可能无响应时，应改为对照代码逐项核验 + 测试复跑，而不是无限等待。
 
 ## [S1] Problem
 
