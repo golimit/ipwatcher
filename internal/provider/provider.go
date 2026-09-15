@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -117,8 +118,22 @@ func (f *Failover) Lookup(ctx context.Context) (netip.Addr, Provider, error) {
 }
 
 // DefaultClient returns the shared HTTP client with the given timeout.
+// Connections are forced to IPv4 (tcp4) so dual-stack hosts still observe
+// their public IPv4 exit address — v0.1 only records IPv4.
 func DefaultClient(timeout time.Duration) *http.Client {
-	return &http.Client{Timeout: timeout}
+	dialer := &net.Dialer{Timeout: timeout}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp4", addr)
+		},
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	return &http.Client{Timeout: timeout, Transport: transport}
 }
 
 // BuildProviders constructs HTTP providers from URLs.

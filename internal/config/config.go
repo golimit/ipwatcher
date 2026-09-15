@@ -47,10 +47,11 @@ func Default() Config {
 		Logging: LoggingConfig{
 			Level: "info",
 		},
+		// Prefer IPv4-only hostnames so dual-stack networks still see IPv4.
 		Providers: []string{
 			"https://api.ipify.org",
-			"https://icanhazip.com",
-			"https://ifconfig.me/ip",
+			"https://ipv4.icanhazip.com",
+			"https://4.ident.me",
 		},
 	}
 }

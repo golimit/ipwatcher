@@ -67,8 +67,8 @@ logging:
 
 providers:
   - https://api.ipify.org
-  - https://icanhazip.com
-  - https://ifconfig.me/ip
+  - https://ipv4.icanhazip.com
+  - https://4.ident.me
 ```
 
 环境变量（优先级高于配置文件）：
