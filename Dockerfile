@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.27-alpine AS build
 ARG VERSION=0.1.0
+# Default proxy.golang.org often times out on homelab/cn networks; override at build time if needed.
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY}
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
